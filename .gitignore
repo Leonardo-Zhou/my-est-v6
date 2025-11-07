@@ -1,0 +1,4 @@
+splits/endovis/curve
+splits/endovis/*.npz
+decompose_ckpt/*
+decompose_ckpt/
