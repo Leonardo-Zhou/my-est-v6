@@ -46,7 +46,7 @@ class Trainer:
 
         self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
         self.model_lr_scheduler = optim.lr_scheduler.MultiStepLR(
-            self.model_optimizer, [self.opt.scheduler_step_size], 0.1)
+            self.model_optimizer, [self.opt.scheduler_step_size], 0.3)
 
         if self.opt.load_weights_folder is not None:
             self.load_model()
@@ -66,6 +66,7 @@ class Trainer:
 
         self.factor_choicer = utils.FactorChoicer(self.opt.batch_size, self.device)
         self.nabla = Nabla(self.device)
+        self.L1 = L1().to(self.device)
 
         num_train_samples = len(train_filenames)
         self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
@@ -213,10 +214,12 @@ class Trainer:
         # 重建损失
         recons_loss = torch.tensor(0.0, device=self.device)
         for f_i in self.opt.frame_ids:
-            recons_loss += (self.compute_reprojection_loss(
-                outputs[("decompose_result", f_i, 0)]["A"] * outputs[("decompose_result", f_i, 0)]["S"],
-                inputs[("color_aug", f_i, 0, 0)]
-            )).mean()
+            for n in [-1, 0, 1]:
+                recons_loss += (self.compute_reprojection_loss(
+                    outputs[("decompose_result", f_i, n)]["A"] * outputs[("decompose_result", f_i, n)]["S"],
+                    inputs[("color_aug", f_i, 0, n)]
+                )).mean()
+
             for n in [-1, 1]:
                 recons_loss += (self.compute_reprojection_loss(
                     outputs[("decompose_result", f_i, n)]["A"] * outputs[("decompose_result", f_i, 0)]["S"],
@@ -237,6 +240,7 @@ class Trainer:
             )).mean()
         losses["retinex_loss"] = retinex_loss
         total_loss += retinex_loss * self.opt.retinex_weight
+        total_loss = torch.nan_to_num(total_loss)
         losses["loss"] = total_loss
         return losses
 

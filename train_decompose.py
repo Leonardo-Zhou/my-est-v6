@@ -15,13 +15,14 @@ def setup_debug_args():
     
     if DEBUG_MODE:
         print("🐛 调试模式已启用，使用预设参数...")
-        opts.load_weights_folder = "./decompose_ckpt/decompose/models/weights_5"
+        # opts.load_weights_folder = "./decompose_ckpt/decompose/models/weights_5"
         opts.models_to_load = ["decompose_encoder", "decompose"]
         opts.data_path = "/data2/publicData/MICCAI19_SCARED/train"
         opts.model_name = f'decompose'
         opts.log_dir = "./decompose_ckpt"
         opts.num_epochs = 20
         opts.batch_size = 6
+        opts.scheduler_step_size = 3
     return opts
 
 if __name__ == "__main__":

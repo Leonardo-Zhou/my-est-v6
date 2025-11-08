@@ -43,13 +43,13 @@ class DecomposeDecoder(nn.Module):
             self.convs[("upconv_A", i, 1)] = ConvBlock(num_ch_in, num_ch_out)
 
         # Output convolutions
-        self.convs[("decompose_A_conv", 0)] = ConvBlock(self.num_ch_dec[0], self.num_output_channels)
+        self.convs[("decompose_A_conv", 0)] = Conv3x3(self.num_ch_dec[0], self.num_output_channels)
 
         self.convs["S_M_branch"] = ConvBlock(3, self.num_ch_dec[0])
-        self.convs[("decompose_S_conv", 0)] = ConvBlock(2 * self.num_ch_dec[0], 1)
+        self.convs[("decompose_S_conv", 0)] = Conv3x3(2 * self.num_ch_dec[0], 1)
 
         self.convs[("M_branch", 0)] = ConvBlock(3, self.num_ch_dec[0])
-        self.convs[("decompose_M_conv", 0)] = ConvBlock(3 * self.num_ch_dec[0], 1)
+        self.convs[("decompose_M_conv", 0)] = Conv3x3(3 * self.num_ch_dec[0], 1)
         self.decoder = nn.ModuleList(list(self.convs.values()))
         self.sigmoid = nn.Sigmoid()
 
@@ -74,7 +74,7 @@ class DecomposeDecoder(nn.Module):
         x_M = torch.cat([x_M, x_S], 1)
     
         # 确保最终输出在正确的设备上
-        self.outputs["A"] = self.convs[("decompose_A_conv", 0)](x_A)
-        self.outputs["S"] = self.convs[("decompose_S_conv", 0)](x_S)
+        self.outputs["A"] = self.sigmoid(self.convs[("decompose_A_conv", 0)](x_A))
+        self.outputs["S"] = self.sigmoid(self.convs[("decompose_S_conv", 0)](x_S))
         self.outputs["M"] = self.sigmoid(self.convs[("decompose_M_conv", 0)](x_M))
         return self.outputs
