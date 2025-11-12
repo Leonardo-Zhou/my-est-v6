@@ -50,72 +50,15 @@ class Options:
                                 default=320)
         
 
-
-
-
         # 损失函数权重
-        self.parser.add_argument("--disparity_smoothness",
+        self.parser.add_argument("--disp_smooth_weight",
                                 type=float,
                                 help="disparity smoothness weight",
                                 default=0.01)
-        self.parser.add_argument("--reconstruction_constraint",
-                                type=float,
-                                help="decomposition-synthesis constraint weight (I = A*S + R)",
-                                default=0.5)  # 增强重建约束
-        self.parser.add_argument("--albedo_constraint",
-                                type=float,
-                                help="albedo consistency constraint weight",
-                                default=0.3)  # 适当增加反照率一致性
-        self.parser.add_argument("--reprojection_constraint",
+        self.parser.add_argument("--reprojection_weight",
                                 type=float,
                                 help="final reconstruction constraint weight",
                                 default=1.0)
-        self.parser.add_argument("--specular_smoothness",
-                                type=float,
-                                help="specular sparsity/smoothness weight",
-                                default=0.5)  # 增强镜面反射的稀疏性约束
-        self.parser.add_argument("--shading_smoothness",
-                                type=float,
-                                help="shading smoothness weight",
-                                default=0.2)
-        self.parser.add_argument("--pps_shading",
-                                type=float,
-                                help="PPS shading smoothness weight",
-                                default=0.1)
-        self.parser.add_argument("--specular_l1_sparsity",
-                                type=float,
-                                help="L1 sparsity constraint for specular component",
-                                default=0.05)  # 新增L1稀疏约束
-        self.parser.add_argument("--pps_corr",
-                                type=float,
-                                help="PPS*Albedo 与 I - Specular 的CORR损失权重",
-                                default=0.1)
-        self.parser.add_argument("--lam",
-                                type=float,
-                                help="lam二范数损失权重",
-                                default=0.05)
-        self.parser.add_argument("--specular_sparse", 
-                                type=float,
-                                help="specular sparsity weight",
-                                default=0.2)
-        self.parser.add_argument("--ps_ori_ssim",
-                                type=float,
-                                help="PPS*Shading 与 I - Specular 的SSIM损失权重",
-                                default=0.1)
-        self.parser.add_argument("--pps_shading_corr",
-                                type=float,
-                                help="计算PPS和shading的corr损失",
-                                default=0.1)
-        self.parser.add_argument("--albedo_sim",
-                                type=float,
-                                help="albedo similarity weight",
-                                default=0.1)
-        self.parser.add_argument("--norm_sim",
-                                type=float,
-                                help="norm map similarity weight",
-                                default=0.5)
-
-
 
 
         # ARCHITECTURE OPTIONS
@@ -180,7 +123,89 @@ class Options:
                                 type=int,
                                 help="number of dataloader workers",
                                 default=12)
+        self.parser.add_argument("--use_adjust_net",
+                                type=bool,
+                                default=True)
+                                
+        self.parser.add_argument("--v1_multiscale",
+                                help="if set, uses monodepth v1 multiscale",
+                                action="store_true")
 
+        self.dpt()
+        self.decompose()
+        self.STR()
+        self.log_load()
+        self.evaluation()
+
+    def decompose(self):
+        self.parser.add_argument("--recons_weight",
+                                type=float,
+                                default=0.9)
+        self.parser.add_argument("--retinex_weight",
+                                type=float,
+                                default=0.1)
+        self.parser.add_argument("--S_smooth_weight",
+                                type=float,
+                                default=0.01)
+        self.parser.add_argument("--decompose_weights_folder",
+                                type=str,
+                                help="folder to load decompose weights from",
+                                default="decompose_ckpt/") 
+
+    def dpt(self):
+        self.parser.add_argument("--vit_encoder",
+                                type=str,
+                                help="vit encoder",
+                                default="vits",
+                                choices=["vits", "vitl", "vitb"])
+
+        self.parser.add_argument("--vit_folder",
+                                type=str,
+                                help="folder to load vit weights from",
+                                default="checkpoints/")
+        self.parser.add_argument("--lora_lr",
+                                type=float,
+                                default=1e-5)
+
+    def STR(self):
+        self.parser.add_argument("--heads",
+                                type=int,
+                                help="number of heads in the transformer",
+                                default=8)
+        self.parser.add_argument("--str_depth",
+                                type=int,
+                                help="depth of the reflection transformer",
+                                default=2)
+        self.parser.add_argument("--embed_dim",
+                                type=int,
+                                help="embedding dimension in the transformer",
+                                default=128)
+        self.parser.add_argument("--drop_rate",
+                                type=float,
+                                help="dropout rate in the transformer",
+                                default=0.0)
+        self.parser.add_argument("--attn_drop_rate",
+                                type=float,
+                                help="attention dropout rate in the transformer",
+                                default=0.0)
+        self.parser.add_argument("--drop_path_rate",
+                                type=float,
+                                help="drop path rate in the transformer",
+                                default=0.1)
+        self.parser.add_argument("--patch_size",
+                                type=int,
+                                help="patch size in the transformer",
+                                default=16)
+        self.parser.add_argument("--qkv_bias",
+                                type=bool,
+                                help="if set, qkv bias in the transformer",
+                                default=False)
+        self.parser.add_argument("--nt_xent_weight",
+                                type=float,
+                                help="weight of NT-Xent loss",
+                                default=0.001)
+
+    def log_load(self):
         # LOADING options
         self.parser.add_argument("--load_weights_folder",
                                 type=str,
@@ -190,7 +215,7 @@ class Options:
                                 nargs="+",
                                 type=str,
                                 help="models to load",
-                                default=["encoder", "depth", "pose_encoder", "pose", "adjust_net", "decompose_encoder", "decompose"])
+                                default=["depth", "pose_encoder", "pose", "decompose_encoder", "decompose"])
 
         # LOGGING options
         self.parser.add_argument("--log_frequency",
@@ -202,7 +227,7 @@ class Options:
                                 help="number of epochs between each save",
                                 default=1)
 
-        # EVALUATION options
+    def evaluation(self):
         self.parser.add_argument("--eval_stereo",
                                 help="if set evaluates in stereo mode",
                                 action="store_true")
@@ -243,32 +268,6 @@ class Options:
                                     "from the original monodepth paper",
                                 action="store_true")
 
-        self.parser.add_argument("--start_pps_epoch",
-                        type=int,
-                        help="epoch to start changing supervision signal to pps * albedo",
-                        default=15)
-
-        self.parser.add_argument("--change_type",
-                                type=str,
-                                default='0')
-
-        self.parser.add_argument("--use_adjust_net",
-                                type=bool,
-                                default=True)
-                                
-        self.parser.add_argument("--v1_multiscale",
-                                help="if set, uses monodepth v1 multiscale",
-                                action="store_true")
-        self.decompose()
-
-
-    def decompose(self):
-        self.parser.add_argument("--recons_weight",
-                                type=float,
-                                default=0.7)
-        self.parser.add_argument("--retinex_weight",
-                                type=float,
-                                default=0.3)
 
     def parse(self):
           self.options = self.parser.parse_args()

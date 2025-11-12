@@ -95,6 +95,59 @@ def load_models(model_path="./logs_v1/ht_dcmnet/models/weights_29", device=torch
 	return models
 
 
+def load_decompose_model(model_path="./decompose_ckpt/decompose/models/weights_5", device=torch.device("cuda")):
+	import sys
+	
+	# 设置模型参数 - 修复Jupyter环境中的参数解析问题
+	opt = Options()
+	# 在Jupyter环境中避免解析命令行参数
+	original_argv = sys.argv
+	sys.argv = [original_argv[0]]  # 只保留脚本名，移除其他参数
+	try:
+		opt = opt.parse()
+	finally:
+		sys.argv = original_argv  # 恢复原始参数
+	
+	opt.height = 256
+	opt.width = 320
+	
+	# 初始化网络
+	models = {}
+	models["decompose_encoder"] = networks.ResnetEncoder(18, False)
+	models["decompose"] = networks.DecomposeDecoder(models["decompose_encoder"].num_ch_enc, use_skips=True)
+	model_weights = {
+		"decompose": "decompose.pth",
+		"decompose_encoder": "decompose_encoder.pth"
+	}
+
+	missing_weights = []
+	for model_name, weight_file in model_weights.items():
+		weight_path = os.path.join(model_path, weight_file)
+		if os.path.exists(weight_path):
+			try:
+				model_dict = models[model_name].state_dict()
+				pretrained_dict = torch.load(weight_path, map_location=device)
+				
+				# 过滤掉不匹配的键，只保留当前模型中存在的参数
+				filtered_dict = {k: v for k, v in pretrained_dict.items() \
+							   if k in model_dict and v.shape == model_dict[k].shape}
+				
+				# 使用strict=False允许部分加载，忽略不匹配的键
+				models[model_name].load_state_dict(filtered_dict, strict=False)
+				models[model_name].freeze()
+			except Exception as e:
+				missing_weights.append(model_name)
+		else:
+			missing_weights.append(model_name)
+
+	# 移动到设备并设置为评估模式
+	for model in models.values():
+		model.to(device)
+		model.eval()
+
+	return models
+
+
 def predict_depth(models, image):
 
 	"""预测深度和反照率"""
@@ -191,6 +244,8 @@ def plot_images(images, lines=1, titles=None, save_path=None, cmaps=None, per_co
     plt.figure(figsize=(cols * per_col_width, lines * per_row_height))
     for i, img in enumerate(images):
         plt.subplot(lines, cols, i + 1)
+        if isinstance(img, torch.Tensor):
+            img = img.detach()
         if isinstance(img, torch.Tensor) and img.dim() == 4:
             img = img.squeeze(0)
         if isinstance(img, torch.Tensor):
@@ -199,7 +254,7 @@ def plot_images(images, lines=1, titles=None, save_path=None, cmaps=None, per_co
             if len(img.shape) == 3:
                 img = img.squeeze(0)
             img = img.cpu().numpy()
-        color_mode = ('gray' if cmaps == None else cmaps) if img.ndim == 2 else None
+        color_mode = ('gray' if cmaps == None else (cmaps[i] if isinstance(cmaps, list) else cmaps)) if img.ndim == 2 else None
         if titles is not None and i < len(titles):
             plt.title(titles[i])
         plt.imshow(img, cmap=color_mode)

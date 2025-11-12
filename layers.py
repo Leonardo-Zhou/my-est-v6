@@ -618,7 +618,7 @@ class Nabla:
         sobel_y = self.sobel.t().view(1,1,3,3).repeat(C,1,1,1)
         gx = F.conv2d(x, sobel_x, padding=1, groups=C)
         gy = F.conv2d(x, sobel_y, padding=1, groups=C)
-        return F.normalize((gx**2 + gy**2).sqrt(), dim=1)
+        return (gx**2 + gy**2).sqrt()
 
     def __call__(self, x):
         return self.forward(x)

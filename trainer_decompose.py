@@ -218,28 +218,42 @@ class Trainer:
                 recons_loss += (self.compute_reprojection_loss(
                     outputs[("decompose_result", f_i, n)]["A"] * outputs[("decompose_result", f_i, n)]["S"],
                     inputs[("color_aug", f_i, 0, n)]
-                )).mean()
+                )).mean() / 3
 
             for n in [-1, 1]:
                 recons_loss += (self.compute_reprojection_loss(
                     outputs[("decompose_result", f_i, n)]["A"] * outputs[("decompose_result", f_i, 0)]["S"],
                     inputs[("color_aug", f_i, 0, 0)]
-                )).mean()
+                ) + self.compute_reprojection_loss(
+                    outputs[("decompose_result", f_i, 0)]["A"] * outputs[("decompose_result", f_i, n)]["S"],
+                    inputs[("color_aug", f_i, 0, n)]
+                )).mean() / 2
+
         losses["reconstruction_loss"] = recons_loss
         total_loss += recons_loss * self.opt.recons_weight
 
         # Retinex 损失
         retinex_loss = torch.tensor(0.0, device=self.device)
         for f_i in self.opt.frame_ids:
+            M = outputs[("decompose_result", f_i, 0)]["M"]
+            # 小修改。
             retinex_loss += (self.compute_reprojection_loss(
                 self.nabla(outputs[("decompose_result", f_i, 0)]["A"]),
-                self.nabla(inputs[("color_aug", f_i, 0, 0)]) * outputs[("decompose_result", f_i, 0)]["M"]
+                self.nabla(inputs[("color_aug", f_i, 0, 0)]) * (1 - M)
             ) + self.compute_reprojection_loss(
                 self.nabla(outputs[("decompose_result", f_i, 0)]["S"]),
-                self.nabla(inputs[("color_aug", f_i, 0, 0)]) * (1 - outputs[("decompose_result", f_i, 0)]["M"])
-            )).mean()
+                self.nabla(inputs[("color_aug", f_i, 0, 0)]) * M
+            )).mean() / 2
         losses["retinex_loss"] = retinex_loss
         total_loss += retinex_loss * self.opt.retinex_weight
+
+        smooth_S = torch.tensor(0.0, device=self.device)
+        for f_i in self.opt.frame_ids:
+            smooth_S += torch.mean(self.nabla(outputs[("decompose_result", f_i, 0)]["S"]) ** 2)
+        losses["smooth_S"] = smooth_S
+        total_loss += smooth_S * self.opt.S_smooth_weight  # Small weight
+
+
         total_loss = torch.nan_to_num(total_loss)
         losses["loss"] = total_loss
         return losses
