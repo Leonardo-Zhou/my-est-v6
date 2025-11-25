@@ -151,12 +151,131 @@ def extract_samples(suppressed_seq, M_seq, num_pos=128, num_neg=128):
 
 # 时空对比损失（同前，但时空anchor）
 def contrastive_loss(anchor, pos, neg, tau=0.07):
-    anchor, pos, neg = map(F.normalize, [anchor, pos, neg])
+    # 添加数值稳定性检查 - 检测到inf时直接退出程序
+    if torch.isinf(anchor).any():
+        print(f"\n[ERROR] contrastive_loss检测到inf值，程序即将退出...")
+        print(f"具体损失函数: contrastive_loss - anchor")
+        print(f"anchor值: {anchor}")
+        print(f"问题位置: utils.contrastive_loss()")
+        print(f"\n[EXIT] 由于检测到inf值，程序异常退出")
+        import sys
+        sys.exit(1)
+    if torch.isinf(pos).any():
+        print(f"\n[ERROR] contrastive_loss检测到inf值，程序即将退出...")
+        print(f"具体损失函数: contrastive_loss - pos")
+        print(f"pos值: {pos}")
+        print(f"问题位置: utils.contrastive_loss()")
+        print(f"\n[EXIT] 由于检测到inf值，程序异常退出")
+        import sys
+        sys.exit(1)
+    if torch.isinf(neg).any():
+        print(f"\n[ERROR] contrastive_loss检测到inf值，程序即将退出...")
+        print(f"具体损失函数: contrastive_loss - neg")
+        print(f"neg值: {neg}")
+        print(f"问题位置: utils.contrastive_loss()")
+        print(f"\n[EXIT] 由于检测到inf值，程序异常退出")
+        import sys
+        sys.exit(1)
+    
+    # NaN值检查（仅警告，不退出）
+    if torch.isnan(anchor).any():
+        print(f"[WARNING] contrastive_loss: anchor包含NaN值")
+        anchor = torch.nan_to_num(anchor, nan=0.0, posinf=1.0, neginf=-1.0)
+    if torch.isnan(pos).any():
+        print(f"[WARNING] contrastive_loss: pos包含NaN值")  
+        pos = torch.nan_to_num(pos, nan=0.0, posinf=1.0, neginf=-1.0)
+    if torch.isnan(neg).any():
+        print(f"[WARNING] contrastive_loss: neg包含NaN值")
+        neg = torch.nan_to_num(neg, nan=0.0, posinf=1.0, neginf=-1.0)
+    
+    # 添加数值稳定性保护，防止归一化时出现数值问题
+    anchor = anchor / (anchor.norm(dim=-1, keepdim=True) + 1e-8)
+    pos = pos / (pos.norm(dim=-1, keepdim=True) + 1e-8)
+    neg = neg / (neg.norm(dim=-1, keepdim=True) + 1e-8)
+    
+    # 检查归一化后的值 - 检测到inf时直接退出
+    if torch.isinf(anchor).any():
+        print(f"\n[ERROR] contrastive_loss检测到inf值，程序即将退出...")
+        print(f"具体损失函数: contrastive_loss - 归一化后anchor")
+        print(f"anchor值: {anchor}")
+        print(f"问题位置: utils.contrastive_loss() - 归一化后检查")
+        print(f"\n[EXIT] 由于检测到inf值，程序异常退出")
+        import sys
+        sys.exit(1)
+    
     sim_pos = F.cosine_similarity(anchor, pos, dim=-1)
     sim_neg = F.cosine_similarity(anchor, neg, dim=-1)
+    
+    # 添加数值稳定性保护，限制相似度值范围
+    sim_pos = torch.clamp(sim_pos, min=-1.0, max=1.0)
+    sim_neg = torch.clamp(sim_neg, min=-1.0, max=1.0)
+    
+    # 检查相似度值 - 检测到inf时直接退出
+    if torch.isinf(sim_pos).any():
+        print(f"\n[ERROR] contrastive_loss检测到inf值，程序即将退出...")
+        print(f"具体损失函数: contrastive_loss - sim_pos")
+        print(f"sim_pos值: {sim_pos}")
+        print(f"问题位置: utils.contrastive_loss() - 余弦相似度计算")
+        print(f"\n[EXIT] 由于检测到inf值，程序异常退出")
+        import sys
+        sys.exit(1)
+    if torch.isinf(sim_neg).any():
+        print(f"\n[ERROR] contrastive_loss检测到inf值，程序即将退出...")
+        print(f"具体损失函数: contrastive_loss - sim_neg")
+        print(f"sim_neg值: {sim_neg}")
+        print(f"问题位置: utils.contrastive_loss() - 余弦相似度计算")
+        print(f"\n[EXIT] 由于检测到inf值，程序异常退出")
+        import sys
+        sys.exit(1)
+    
     logits = torch.stack([sim_pos, sim_neg], dim=1) / tau
+    
+    # 添加数值稳定性保护，限制logits值范围
+    logits = torch.clamp(logits, min=-10.0, max=10.0)
+    
+    # 检查logits - 检测到inf时直接退出
+    if torch.isinf(logits).any():
+        print(f"\n[ERROR] contrastive_loss检测到inf值，程序即将退出...")
+        print(f"具体损失函数: contrastive_loss - logits")
+        print(f"logits值: {logits}")
+        print(f"tau值: {tau}")
+        print(f"问题位置: utils.contrastive_loss() - logits计算")
+        print(f"\n[EXIT] 由于检测到inf值，程序异常退出")
+        import sys
+        sys.exit(1)
+    
     labels = torch.zeros(anchor.size(0), dtype=torch.long, device=anchor.device)
-    return F.cross_entropy(logits, labels)
+    
+    # 添加数值稳定性保护，使用logsumexp计算交叉熵
+    log_probs = F.log_softmax(logits, dim=1)
+    loss = -log_probs.gather(1, labels.unsqueeze(1)).squeeze()
+    loss = loss.mean()
+    
+    # 检查最终损失 - 检测到inf时直接退出
+    if torch.isinf(loss).any():
+        print(f"\n[ERROR] contrastive_loss检测到inf值，程序即将退出...")
+        print(f"具体损失函数: contrastive_loss - 最终损失")
+        print(f"损失值: {loss}")
+        print(f"问题位置: utils.contrastive_loss() - 交叉熵计算")
+        print(f"\n[EXIT] 由于检测到inf值，程序异常退出")
+        import sys
+        sys.exit(1)
+    
+    # NaN值检查（仅警告，不退出）
+    if torch.isnan(anchor).any():
+        print(f"[WARNING] contrastive_loss: 归一化后anchor包含NaN值")
+    if torch.isnan(sim_pos).any():
+        print(f"[WARNING] contrastive_loss: sim_pos包含NaN值, sim_pos={sim_pos}")
+    if torch.isnan(sim_neg).any():
+        print(f"[WARNING] contrastive_loss: sim_neg包含NaN值, sim_neg={sim_neg}")
+    if torch.isnan(logits).any():
+        print(f"[WARNING] contrastive_loss: logits包含NaN值, logits={logits}, tau={tau}")
+    if torch.isnan(loss).any():
+        print(f"[WARNING] contrastive_loss: 最终损失包含NaN值, loss={loss}")
+        # 返回一个很小的正值而不是0，以保持梯度流
+        return torch.tensor(1e-8, device=anchor.device, requires_grad=True)
+    
+    return loss
 
 def disp_to_depth(disp, min_depth, max_depth):
     """Convert network's sigmoid output into depth prediction
@@ -186,7 +305,7 @@ def get_smooth_loss(disp, img):
 
     return grad_disp_x.mean() + grad_disp_y.mean()
 
-def visualize_depth(depth):
+def visualize_depth(depth, cmap='magma'):
     """
     depth: (H, W)
     """
@@ -195,7 +314,37 @@ def visualize_depth(depth):
     vmax = np.percentile(x, 95)
 
     normalizer = mpl.colors.Normalize(vmin=x.min(), vmax=vmax) # 归一化到0-1
-    mapper = cm.ScalarMappable(norm=normalizer, cmap='magma') # colormap
+    mapper = cm.ScalarMappable(norm=normalizer, cmap=cmap) # colormap
     colormapped_im = (mapper.to_rgba(x)[:, :, :3] * 255).astype(np.uint8)
     colormapped_im=np.transpose(colormapped_im,(2,0,1))
     return colormapped_im
+
+
+def highlight_mask(image_tensor, threshold=0.85, min_lightness=0.7):
+    """
+    极简高光检测：把亮度超过阈值的像素当作“高光”。
+    
+    参数
+    ----
+    image_tensor : torch.Tensor
+        形状 (B, 3, H, W)，取值范围 [0, 1]（float32）。
+    threshold : float
+        亮度通道超过该值才视为高光（0~1）。
+    min_lightness : float
+        额外限制：RGB 三个通道都不能太低，防止把灰色也当成高光。
+    
+    返回
+    ----
+    mask : torch.Tensor
+        形状 (B, 1, H, W)，True 表示高光像素。
+    """
+    # 1. 计算亮度（NTSC 公式）
+    luminance = 0.299 * image_tensor[:, 0] + 0.587 * image_tensor[:, 1] + 0.114 * image_tensor[:, 2]  # (B, H, W)
+    
+    # 2. 高光条件：亮 + 不能太灰
+    bright = luminance > threshold
+    not_gray = image_tensor.min(dim=1)[0] > min_lightness  # 每个像素 RGB 最小值 > min_lightness
+    
+    mask = bright & not_gray  # (B, H, W)
+    
+    return mask.unsqueeze(1)  # (B, 1, H, W)

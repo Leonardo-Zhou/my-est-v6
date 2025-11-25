@@ -183,6 +183,167 @@ class PatchEmbed(nn.Module):
         return x, H, W
 
 
+class BasicBlock(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, with_qkv=True
+        )
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+    
+    def forward(self, x):
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        return x
+
+
+class SupressedHead(nn.Module):
+    def __init__(self, 
+                 encoder_embed_dim=256, 
+                 decoder_embed_dim=512, 
+                 decoder_depth=8, 
+                 decoder_num_heads=8, 
+                 mlp_ratio=4., 
+                 qkv_bias=True, 
+                 qk_scale=None, 
+                 drop_rate=0., 
+                 attn_drop_rate=0., 
+                 drop_path_rate=0.1, 
+                 patch_size=8, 
+                 in_chans=3, 
+                 img_shape=(256, 320), 
+                 T=5, 
+                 norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.patch_size = patch_size
+        self.in_chans = in_chans
+        self.img_shape = img_shape
+        self.T = T
+        self.num_features_levels = 4  # From intermediate_layer_idx [2,5,8,11]
+        
+        Hp = img_shape[0] // patch_size
+        Wp = img_shape[1] // patch_size
+        self.num_patches_per_frame = Hp * Wp
+        
+        # Projection layers for each encoder feature level to decoder dim // num_levels for concat
+        self.level_proj = nn.ModuleList([
+            nn.Linear(encoder_embed_dim, decoder_embed_dim // self.num_features_levels) for _ in range(self.num_features_levels)
+        ])
+        
+        # Positional embeddings (spatial, shared across time and levels)
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches_per_frame + 1, decoder_embed_dim))  # +1 for cls
+        
+        # Time embeddings for decoder
+        self.time_embed = nn.Parameter(torch.zeros(1, T, decoder_embed_dim))
+        
+        # Decoder blocks: MAE-like Transformer decoder layers
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, decoder_depth)]
+        self.decoder_blocks = nn.ModuleList([
+            BasicBlock(
+                dim=decoder_embed_dim, 
+                num_heads=decoder_num_heads, 
+                mlp_ratio=mlp_ratio, 
+                qkv_bias=qkv_bias, 
+                qk_scale=qk_scale, 
+                drop=drop_rate, 
+                attn_drop=attn_drop_rate, 
+                drop_path=dpr[i], 
+                norm_layer=norm_layer
+            ) for i in range(decoder_depth)
+        ])
+        
+        self.decoder_norm = norm_layer(decoder_embed_dim)
+        
+        # Prediction head: linear to pixel values per patch
+        self.pred_head = nn.Linear(decoder_embed_dim, patch_size ** 2 * in_chans)
+        
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+        elif isinstance(m, nn.Parameter):
+            if m.dim() > 1:
+                torch.nn.init.xavier_uniform_(m)
+    
+    def forward(self, features):
+        B = features[0][1].shape[0]  # From cls_tokens shape (B, embed_dim)
+        Hp, Wp = self.img_shape[0] // self.patch_size, self.img_shape[1] // self.patch_size
+        N = Hp * Wp
+        
+        # Process each level
+        level_patches = []
+        cls_tokens_list = []
+        for i, (patches, cls_tokens) in enumerate(features):
+            # patches: (B*T, N, encoder_embed_dim)
+            # cls_tokens: (B, encoder_embed_dim)
+            proj_patches = self.level_proj[i](patches)  # (B*T, N, decoder_dim // 4)
+            proj_cls = self.level_proj[i](cls_tokens)  # (B, decoder_dim // 4)
+            level_patches.append(proj_patches)
+            cls_tokens_list.append(proj_cls)
+        
+        # Fusion: concat along dim for patches and cls
+        fused_patches = torch.cat(level_patches, dim=-1)  # (B*T, N, decoder_dim)
+        fused_cls = torch.cat(cls_tokens_list, dim=-1)  # (B, decoder_dim)
+        
+        # Reshape patches to (B, T, N, decoder_dim)
+        x = fused_patches.view(B, self.T, N, -1)
+        
+        # Add time embeddings
+        time_emb = self.time_embed.unsqueeze(2).repeat(1, 1, N, 1)
+        time_emb = time_emb.repeat(B, 1, 1, 1)
+        x = x + time_emb
+        
+        # Add positional embeddings
+        pos_emb_patch = self.pos_embed[:, 1:1 + N, :]
+        pos_emb = pos_emb_patch.unsqueeze(0).repeat(1, self.T, 1, 1)
+        pos_emb = pos_emb.repeat(B, 1, 1, 1)
+        x = x + pos_emb
+        
+        # Flatten to sequence: (B*T, N, decoder_dim)
+        x = x.view(B * self.T, N, -1)
+        
+        # Handle CLS: (B, decoder_dim) -> (B, T, decoder_dim) -> (B*T, 1, decoder_dim)
+        fused_cls = fused_cls.unsqueeze(1).repeat(1, self.T, 1)
+        fused_cls = fused_cls.view(B * self.T, 1, -1)
+        
+        # Concat CLS to patches: (B*T, 1 + N, decoder_dim)
+        x = torch.cat([fused_cls, x], dim=1)
+        
+        # Pass through decoder blocks
+        for blk in self.decoder_blocks:
+            x = blk(x)
+        
+        x = self.decoder_norm(x)
+        
+        # Remove CLS: (B*T, N, decoder_dim)
+        x = x[:, 1:, :]
+        
+        # Predict pixels: (B*T, N, p**2 * C)
+        x = self.pred_head(x)
+        
+        # Unpatchify
+        p = self.patch_size
+        C = self.in_chans
+        x = x.view(x.shape[0], Hp, Wp, p, p, C)
+        x = x.permute(0, 5, 1, 3, 2, 4).contiguous()
+        x = x.view(x.shape[0], C, Hp * p, Wp * p)
+        
+        # Reshape to (B, T, C, H, W)
+        x = x.view(B, self.T, C, self.img_shape[0], self.img_shape[1])
+        
+        return x
+
 # Adapted module for reflection suppression
 class AdaptedSpatioTemporalReflectionModule(nn.Module):
     def __init__(self, 
@@ -239,9 +400,9 @@ class AdaptedSpatioTemporalReflectionModule(nn.Module):
                     i += 1
         
         self.norm = norm_layer(embed_dim)
-        
-        # Output projection to restore original channels
-        self.proj_out = nn.ConvTranspose2d(embed_dim, in_channels, kernel_size=patch_size, stride=patch_size)
+        self.supresse_head = SupressedHead(embed_dim, 2 * embed_dim, patch_size=patch_size, img_shape=img_shape, T=T)
+        self.intermediate_layer_idx = [2, 5, 8, 11]
+        self.feature_norm = True
 
 
     def _init_weights(self, m):
@@ -294,24 +455,27 @@ class AdaptedSpatioTemporalReflectionModule(nn.Module):
         # x = torch.cat((cls_tokens, x), dim=1).contiguous()
         x = torch.cat((cls_tokens, x), dim=1)
         
-        # Attention blocks
-        for blk in self.blocks:
+        features = []
+        for i, blk in enumerate(self.blocks):
             x = blk(x, B, T, Wp)  # Pass B, T, Wp for view in Block
+            if i in self.intermediate_layer_idx:
+                features.append(x)
         
         x = self.norm(x)
+        if self.feature_norm:
+            features = [self.norm(f) for f in features]
+            class_tokens = [f[:,0] for f in features]
+            features = [rearrange(f[:,1:], 'b (h w t) m -> (b t) (h w) m',b=B,t=T,h=Hp, w=Wp) for f in features]
+            features = tuple(zip(features, class_tokens))
         
-        # Restore: remove cls, reshape to image
-        x = x[:,1:]  # Remove cls
-        x = x.reshape(B * T, Hp * Wp, -1).permute(0,2,1).contiguous().reshape(B * T, self.embed_dim, Hp, Wp)  # [B*T, embed_dim, Hp, Wp]
-        output = self.proj_out(x)  # [B*T, C, H, W]
-        output = output.reshape(B, T, C, H, W)
-        
+        output = self.supresse_head(features)
+
         return output
 
 # Test with print for debug
 A_seq = torch.randn(1, 5, 3, 256, 320)  # Small size to avoid tool memory issue
 M_seq = torch.randn(1, 5, 1, 256, 320)
-model = AdaptedSpatioTemporalReflectionModule(patch_size=16, embed_dim=128)  # Adjust patch for small H/W
+model = AdaptedSpatioTemporalReflectionModule(patch_size=16, embed_dim=128, depth=12)  # Adjust patch for small H/W
 print("Input A_seq shape:", A_seq.shape)
 out = model(A_seq, M_seq)
 print("Output shape:", out.shape)

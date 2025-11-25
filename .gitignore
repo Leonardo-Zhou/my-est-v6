@@ -5,6 +5,8 @@ decompose_ckpt/
 checkpoints/*
 logs/*
 demo01.jpg
+logs_v2/*
+logs_deformable/*
 
 # Python cache files
 __pycache__/

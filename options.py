@@ -54,7 +54,7 @@ class Options:
         self.parser.add_argument("--disp_smooth_weight",
                                 type=float,
                                 help="disparity smoothness weight",
-                                default=0.01)
+                                default=0.001)
         self.parser.add_argument("--reprojection_weight",
                                 type=float,
                                 help="final reconstruction constraint weight",
@@ -140,13 +140,16 @@ class Options:
     def decompose(self):
         self.parser.add_argument("--recons_weight",
                                 type=float,
-                                default=0.9)
+                                default=1.5)
         self.parser.add_argument("--retinex_weight",
                                 type=float,
                                 default=0.1)
         self.parser.add_argument("--S_smooth_weight",
                                 type=float,
-                                default=0.01)
+                                default=0.1)
+        self.parser.add_argument("--M_sparse_weight",
+                                type=float,
+                                default=0.5)
         self.parser.add_argument("--decompose_weights_folder",
                                 type=str,
                                 help="folder to load decompose weights from",
@@ -166,6 +169,16 @@ class Options:
         self.parser.add_argument("--lora_lr",
                                 type=float,
                                 default=1e-5)
+
+        self.parser.add_argument("--sep_qkv",
+                                type=bool,
+                                default=True)
+        self.parser.add_argument("--da_sep_qkv_folder",
+                                type=str,
+                                help="folder to load depth anything seperate qkv weights from",
+                                default="checkpoints/Depth-Anything-V2-Small-hf")
+
+
 
     def STR(self):
         self.parser.add_argument("--heads",
@@ -203,7 +216,16 @@ class Options:
         self.parser.add_argument("--nt_xent_weight",
                                 type=float,
                                 help="weight of NT-Xent loss",
-                                default=0.001)
+                                default=0.000)
+        self.parser.add_argument("--attn_suppress_weight",
+                                type=float,
+                                help="weight of attention suppress loss",
+                                default=0.1)
+        self.parser.add_argument("--str_sim_epoch",
+                                type=int,
+                                help="epochs for STR to learn similarity to Abedo",
+                                default=10)
+                
 
     def log_load(self):
         # LOADING options

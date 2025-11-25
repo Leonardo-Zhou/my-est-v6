@@ -91,9 +91,9 @@ class Trainer:
             )
 
         self.models["depth"] = get_peft_model(model, lora_config)
-        self.low_lr_parameters += list(self.models["depth"].parameters())
+        # self.low_lr_parameters += list(self.models["depth"].parameters())
 
-        self.models["reflection"] = networks.SpatioTemporalReflectionModule(
+        self.models["reflection"] = networks.SpatioTemporalDeformableReflectionModule(
             num_heads=self.opt.heads, 
             embed_dim=self.opt.embed_dim,
             depth=self.opt.str_depth,
@@ -135,7 +135,8 @@ class Trainer:
             self.opt.num_layers,
             self.opt.weights_init == "pretrained",
             num_input_images=self.num_pose_frames)
-        self.normal_lr_parameters += list(self.models["pose_encoder"].parameters())
+        # self.normal_lr_parameters += list(self.models["pose_encoder"].parameters())
+        self.low_lr_parameters += list(self.models["pose_encoder"].parameters())
 
         self.models["pose"] = networks.PoseDecoder(
             self.models["pose_encoder"].num_ch_enc,
@@ -342,15 +343,9 @@ class Trainer:
             outputs[("decompose_result", f_i, "enhanced")] = self.models["decompose"](decompose_features[(f_i, "enhanced")], inputs[("color_aug", f_i, 0, "enhanced")])
             
     def suppress(self, inputs, outputs):
-        input_A = [outputs[("decompose_result", f_i)]["A"] for f_i in self.frames]
-        input_M = [outputs[("decompose_result", f_i)]["M"] for f_i in self.frames]
-        # (B, T, C, H, W)
-        input_A = torch.stack(input_A, dim=1)
-        input_M = torch.stack(input_M, dim=1)
-        outputs[("sequenced_M", 0)] = input_M
-        outputs[("suppressed_result", "all")] = self.models["reflection"](input_A, input_M)
-        for f_i in self.frames:
-            outputs[("suppressed", f_i)] = outputs[("suppressed_result", "all")][:, f_i, :, :, :]
+        # 与最初版本相比，先对A和M进行warp，再计算suppress。
+        input_A = [outputs[("decompose_result", 0)]["A"]]
+        input_M = [outputs[("decompose_result", 0)]["M"]]
 
         disp = outputs[("disp", 0)]
         disp = F.interpolate(disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
@@ -364,11 +359,17 @@ class Trainer:
 
             outputs[("warp", 0, f_i)] = pix_coords
 
-            outputs[("suppressed_warp", f_i)] = F.grid_sample(
-                outputs[("suppressed", f_i)],
+            outputs[("A_warp", f_i)] = F.grid_sample(
+                outputs[("decompose_result", f_i)]["A"],
                 pix_coords,
-                mode="bilinear",
-                align_corners=False
+                padding_mode="border",
+                align_corners=True
+            )
+            outputs[("M_warp", f_i)] = F.grid_sample(
+                outputs[("decompose_result", f_i)]["M"],
+                pix_coords,
+                padding_mode="border",
+                align_corners=True
             )
             # masking zero values
             mask_ones = torch.ones_like(inputs[("color_aug", f_i, 0)])
@@ -378,6 +379,16 @@ class Trainer:
                 padding_mode="zeros", align_corners=True)
             valid_mask = (mask_warp.abs().mean(dim=1, keepdim=True) > 0.0).float()
             outputs[("valid_mask", 0, f_i)] = valid_mask
+            input_A.append(outputs[("A_warp", f_i)])
+            input_M.append(outputs[("M_warp", f_i)])
+
+        # (B, T, C, H, W)
+        input_A = torch.stack(input_A, dim=1)
+        input_M = torch.stack(input_M, dim=1)
+        outputs[("sequenced_M", 0)] = input_M
+        outputs[("suppressed_result", "all")] = self.models["reflection"](input_A, input_M)
+        for i, f_i in enumerate(self.opt.frame_ids):
+            outputs[("suppressed", f_i)] = outputs[("suppressed_result", "all")][:, i, :, :, :]
 
     def compute_decompose_loss(self, inputs, outputs, losses):
         recons_loss = torch.tensor(0.0, device=self.device)
@@ -691,9 +702,8 @@ class Trainer:
 
         losses["loss"] += 1.5 * loss_fill + 0.8 * loss_find
 
-
     def compute_supressed_loss(self, inputs, outputs, losses):
-        self.sl4(inputs, outputs, losses)
+        self.sl2(inputs, outputs, losses)
 
         sim_loss = torch.tensor(0.0, device=self.device)
         if self.epoch < self.opt.str_sim_epoch:
@@ -706,14 +716,14 @@ class Trainer:
             losses["sim_loss"] = sim_loss
             losses["loss"] += sim_loss
         else:
-            for f_i in self.opt.frame_ids:
-                M = outputs[("decompose_result", f_i)]["M"]
+            for f_i in self.opt.frame_ids[1:]:
+                M = outputs[("M_warp", f_i)]
                 med = M.mean()
                 B = self.opt.batch_size
                 M_spec = (M > med).float().view(B, 1, self.opt.height, self.opt.width)
                 sim_loss += self.compute_reprojection_loss(
                     outputs[("suppressed", f_i)] * (1 - M_spec),
-                    outputs[("decompose_result", f_i)]["A"] * (1 - M_spec)
+                    outputs[("A_warp", f_i)] * (1 - M_spec)
                 ).mean()
             sim_loss /= self.num_input_frames
             losses["sim_loss"] = sim_loss
@@ -726,7 +736,7 @@ class Trainer:
                 mask_sum = mask.sum()
                 if mask_sum > 0:
                     reprojection_loss += self.compute_reprojection_loss(
-                        outputs[("suppressed_warp", f_i)],
+                        outputs[("suppressed", f_i)],
                         outputs[("suppressed", 0)]
                     ).sum() / mask_sum
             reprojection_loss /= (self.num_input_frames - 1)
@@ -868,23 +878,21 @@ class Trainer:
                     input_data = torch.nan_to_num(input_data, nan=0.0, posinf=1.0, neginf=0.0)
                 writer.add_image("input/{}".format(j), input_data, self.step)
                 
-                suppressed_data = outputs[("suppressed", 0)][j].data
-                if torch.isnan(suppressed_data).any() or torch.isinf(suppressed_data).any():
-                    print(f"[WARNING] TensorBoard日志记录: suppressed图像包含NaN或Inf值，使用第{j}个样本")
-                    suppressed_data = torch.nan_to_num(suppressed_data, nan=0.0, posinf=1.0, neginf=0.0)
-                writer.add_image("suppressed/{}".format(j), suppressed_data, self.step)
-                writer.add_image("suppressed-1/{}".format(j), outputs[("suppressed", -1)][j].data, self.step)
-                writer.add_image("suppressed+1/{}".format(j), outputs[("suppressed", 1)][j].data, self.step)
+                for frame_id in self.opt.frame_ids:
+                    writer.add_image("suppressed {}/{}".format(frame_id, j), outputs[("suppressed", frame_id)][j].data, self.step)
                 
-                A_data = outputs[("decompose_result", 0)]["A"][j].data
-                if torch.isnan(A_data).any() or torch.isinf(A_data).any():
-                    print(f"[WARNING] TensorBoard日志记录: A图像包含NaN或Inf值，使用第{j}个样本")
-                    A_data = torch.nan_to_num(A_data, nan=0.0, posinf=1.0, neginf=0.0)
-                writer.add_image("A/{}".format(j), A_data, self.step)
+                # A_data = outputs[("decompose_result", 0)]["A"][j].data
+                # if torch.isnan(A_data).any() or torch.isinf(A_data).any():
+                #     print(f"[WARNING] TensorBoard日志记录: A图像包含NaN或Inf值，使用第{j}个样本")
+                #     A_data = torch.nan_to_num(A_data, nan=0.0, posinf=1.0, neginf=0.0)
+                # writer.add_image("A/{}".format(j), A_data, self.step)
+                for frame_id in self.opt.frame_ids:
+                    writer.add_image("A {}/{}".format(frame_id, j), outputs[("decompose_result", frame_id)]["A"][j].data, self.step)
+                for frame_id in self.opt.frame_ids[1:]:
+                    writer.add_image("A_warp {}/{}".format(frame_id, j), outputs[("A_warp", frame_id)][j].data, self.step)
 
-                writer.add_image("A-1/{}".format(j), outputs[("decompose_result", -1)]["A"][j].data, self.step)
-                writer.add_image("A+1/{}".format(j), outputs[("decompose_result", 1)]["A"][j].data, self.step)
-
+                for frame_id in self.opt.frame_ids[1:]:
+                    writer.add_image("valid mask {}/{}".format(frame_id, j), outputs[("valid_mask", 0, frame_id)][j].data, self.step)
                 
                 S_data = outputs[("decompose_result", 0)]["S"][j].data
                 if torch.isnan(S_data).any() or torch.isinf(S_data).any():
@@ -903,7 +911,6 @@ class Trainer:
                 print(f"[ERROR] TensorBoard日志记录失败: {e}")
                 continue
             
-
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with"""
         models_dir = os.path.join(self.log_path, "models")

@@ -173,7 +173,13 @@ class MonoDataset(data.Dataset):
                 other_side = {"r": "l", "l": "r"}[side]
                 inputs[("color", i, -1)] = self.get_color(folder, frame_index, other_side, do_flip)
             else:
-                inputs[("color", i, -1)] = self.get_color(folder, frame_index + i, side, do_flip)
+                try:
+                    inputs[("color", i, -1)] = self.get_color(folder, frame_index + i, side, do_flip)
+                except FileNotFoundError:
+                    coe = 1
+                    if i < 0:
+                        coe = -1
+                    inputs[("color", i, -1)] = self.get_color(folder, frame_index + coe, side, do_flip)
 
         # adjusting intrinsics to match each scale in the pyramid
         # 修改1.2：新增 K 的更改。不使用固定参数K。

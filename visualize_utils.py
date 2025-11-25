@@ -276,10 +276,16 @@ def get_image_path(dataset_id, keyframe_id, frame_index):
     return ori_image_path
 
 
-def load_image(image_path, device):
+def load_image(image_path, device, resize_shape=(256, 320)):
 	image = Image.open(image_path).convert('RGB')
+	if isinstance(resize_shape, str) and resize_shape.lower() == 'ori':
+		transform = transforms.Compose([
+			transforms.ToTensor()
+		])
+		image = transform(image).unsqueeze(0).to(device)
+		return image
 	transform = transforms.Compose([
-		transforms.Resize((256, 320)),
+		transforms.Resize(resize_shape),
 		transforms.ToTensor()
 	])
 	image = transform(image).unsqueeze(0).to(device)

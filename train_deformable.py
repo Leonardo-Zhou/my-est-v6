@@ -2,7 +2,7 @@ from __future__ import absolute_import, division, print_function
 
 import sys
 import os
-from trainer import Trainer
+from trainer_v2 import Trainer
 from options import Options
 
 # 调试模式开关
@@ -17,16 +17,19 @@ def setup_debug_args():
         print("🐛 调试模式已启用，使用预设参数...")
         
         # 直接设置参数值
-        opts.load_weights_folder = "./logs/str_sim/models/weights_9"
+        # opts.load_weights_folder = "./logs/str_sim/models/weights_9"
         opts.data_path = "/data2/publicData/MICCAI19_SCARED/train"
         opts.decompose_weights_folder = "./decompose_ckpt/decompose_new1/models/weights_14"
         opts.models_to_load = ["pose_encoder", "pose", "decompose_encoder", "decompose", 'reflection']
-        opts.log_dir = "./logs"
-        opts.model_name = "test4"
-        opts.num_epochs = 20
+        opts.log_dir = "./logs_deformable"
+        opts.model_name = "str_sim"
+        opts.num_epochs = 10
         opts.batch_size = 4
+        opts.disp_smooth_weight = 0.0
         opts.patch_size = 16
         opts.str_depth = 12
+        # opts.log_frequency = 10
+        opts.frame_ids = [0, -10, 10]
 
         # 可以添加更多调试友好的参数
         # opts.num_workers = 1  # 单线程，便于调试

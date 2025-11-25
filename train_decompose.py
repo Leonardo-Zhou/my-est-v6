@@ -2,7 +2,8 @@ from __future__ import absolute_import, division, print_function
 
 import sys
 import os
-from trainer_decompose import Trainer
+# from trainer_decompose import Trainer
+from trainer_decompose_new import Trainer
 from options import Options
 
 # 调试模式开关
@@ -15,12 +16,12 @@ def setup_debug_args():
     
     if DEBUG_MODE:
         print("🐛 调试模式已启用，使用预设参数...")
-        # opts.load_weights_folder = "./decompose_ckpt/decompose/models/weights_5"
+        opts.load_weights_folder = "./decompose_ckpt/decompose_new1/models/weights_10"
         opts.models_to_load = ["decompose_encoder", "decompose"]
         opts.data_path = "/data2/publicData/MICCAI19_SCARED/train"
-        opts.model_name = f'decompose_M'
+        opts.model_name = f'decompose_new1'
         opts.log_dir = "./decompose_ckpt"
-        opts.num_epochs = 6
+        opts.num_epochs = 15
         opts.batch_size = 6
         opts.scheduler_step_size = 3
     return opts

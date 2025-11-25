@@ -134,10 +134,12 @@ def test_memory_usage():
         {'drm': networks.SpatioTemporalReflectionModule, 'name': 'SpatioTemporalReflectionModule'},
     ]
     for config in test_configs:
+        B, T, H, W = 4, 3, 256, 320
+    
         print(f"\n--- 测试网络 {config['name']} ---")
 
         # 创建DynamicReflectionModule
-        drm = config['drm'](patch_size=16, embed_dim=128).to(torch.device("cuda"))
+        drm = config['drm'](patch_size=16, embed_dim=128, T=T).to(torch.device("cuda"))
         drm_memory = analyze_model_memory(drm, config['name'])
         print_memory_info("创建DRM后: ")
         
@@ -151,7 +153,6 @@ def test_memory_usage():
             # 重置峰值显存记录
             torch.cuda.reset_peak_memory_stats()
             
-            B, T, H, W = 8, 5, 256, 320
             
             # 创建测试数据
             images = []
