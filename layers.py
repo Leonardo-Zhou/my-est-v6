@@ -221,11 +221,15 @@ def upsample(x):
     return F.interpolate(x, scale_factor=2, mode="nearest")
 
 
-def get_smooth_loss(disp, img):
+def get_smooth_loss(disp, img, mask=None):
     
     """Computes the smoothness loss for a disparity image
     The color image is used for edge-aware smoothness
     """
+    if mask is not None:
+        disp = disp * mask
+        img = img * mask
+
     grad_disp_x = torch.abs(disp[:, :, :, :-1] - disp[:, :, :, 1:])
     grad_disp_y = torch.abs(disp[:, :, :-1, :] - disp[:, :, 1:, :])
 
@@ -632,3 +636,174 @@ class L1(nn.Module):
 
     def forward(self, pred, target):
         return torch.abs(pred - target).mean()
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import layers
+
+class NormalCalculator(nn.Module):
+    """根据论文公式从3D点云计算法线和不确定性图的模块。
+    
+    忠于论文公式(6)和(7)的计算方式。
+    使用张量操作和广播进行向量化计算，避免Python循环，以支持CUDA加速。
+    边界使用'replicate' padding处理。
+    假设输入的3D点已处于相机坐标系中，Z轴指向前方（正Z）。
+    """
+
+    def __init__(self, height, width, batch_size=1):
+        super(NormalCalculator, self).__init__()
+        self.height = height
+        self.width = width
+        self.batch_size = batch_size
+        
+        # 假设有backproject模块，与用户代码一致
+        self.backproject = layers.BackprojectDepth(batch_size, height, width)  # 请替换为实际导入
+        
+    def forward_from_depth(self, depth, K):
+        """
+        
+        Args:
+            depth: [B, 1, H, W] 深度图
+            K: [B, 4, 4] 相机内参
+            
+        Returns:
+            normals: [B, 3, H, W] 法线图（单位向量）
+        """
+        B, _, H, W = depth.shape
+        
+        # 获取3D点云
+        inv_K = torch.inverse(K)
+        points_3d = self.backproject(depth, inv_K)
+        
+        return self.forward_from_points(points_3d)
+    
+    def forward_from_points(self, points_3d):
+        """
+        从3D点云计算法线（忠于论文公式(6)）
+        
+        论文公式: N_p^b = 1 / |Ω| ∑_{pi,pj ∈ Ω} [ (P_pi - P_p) × (P_pj - P_p) / ||(P_pi - P_p) × (P_pj - P_p)||_2 ]
+        但公式中1/|Ω|与sum over pi,pj不匹配（|Ω|=8，但sum over 8x8=64项）。
+        根据上下文和Fig.3(a)，这是对所有pi,pj对（包括i!=j）的归一化叉积平均。
+        为解决方向问题：对每个叉积后，翻转使Z>0，然后平均所有非对角项，最后归一化。
+        总项数：8*7=56（排除i==j）。
+        
+        Args:
+            points_3d: [B, 4, H*W] 3D点云（齐次坐标）
+            
+        Returns:
+            normals: [B, 3, H, W] 法线图（单位向量）
+        """
+        B = points_3d.shape[0]
+        H, W = self.height, self.width
+        
+        # 提取XYZ并reshape为[B, 3, H, W]
+        xyz = points_3d[:, :3].view(B, 3, H, W)
+        
+        # 使用replicate padding处理边界
+        pad_xyz = F.pad(xyz, (1, 1, 1, 1), mode='replicate')
+        
+        # 提取8个邻域点：[B, 3, H, W, 8]
+        offsets = [(dy, dx) for dy in [-1, 0, 1] for dx in [-1, 0, 1] if not (dy == 0 and dx == 0)]
+        neigh_list = []
+        for dy, dx in offsets:
+            neigh = pad_xyz[:, :, 1 + dy : 1 + dy + H, 1 + dx : 1 + dx + W]
+            neigh_list.append(neigh)
+        neigh = torch.stack(neigh_list, dim=4)  # [B, 3, H, W, 8]
+        
+        # 计算所有pi,pj对的向量：[B, 3, H, W, 8, 8]
+        vec1 = neigh.unsqueeze(5) - xyz.unsqueeze(4).unsqueeze(5)  # 广播到 [B, 3, H, W, 8, 1] - [B, 3, H, W, 1, 1]
+        vec2 = neigh.unsqueeze(4) - xyz.unsqueeze(4).unsqueeze(5)  # 广播到 [B, 3, H, W, 1, 8] - [B, 3, H, W, 1, 1]
+        
+        # 计算叉积：[B, 3, H, W, 8, 8]
+        cross = torch.cross(vec1, vec2, dim=1)
+        
+        # 计算L2范数：[B, 1, H, W, 8, 8]
+        norm = torch.norm(cross, p=2, dim=1, keepdim=True) + 1e-8
+        
+        # 归一化叉积：[B, 3, H, W, 8, 8]
+        n = cross / norm
+        
+        # 如果Z分量<0，翻转方向：[B, 3, H, W, 8, 8]
+        flip_mask = n[:, 2, :, :, :, :] < 0  # [B, H, W, 8, 8]
+        n = torch.where(flip_mask.unsqueeze(1), -n, n)
+        
+        # 掩码排除对角（i==j）：对角叉积为0
+        diag_mask = 1.0 - torch.eye(8, device=n.device)  # [8, 8]，对角0，其他1
+        diag_mask = diag_mask.view(1, 1, 1, 1, 8, 8)  # [1, 1, 1, 1, 8, 8]
+        
+        # 应用掩码并求和：[B, 3, H, W]
+        masked_n = n * diag_mask
+        sum_n = masked_n.sum(dim=[4, 5])
+        
+        # 平均（除以非对角项数56）
+        num_pairs = 8.0 * 7.0
+        avg_n = sum_n / num_pairs
+        
+        # 最终归一化平均向量：[B, 3, H, W]
+        avg_norm = torch.norm(avg_n, p=2, dim=1, keepdim=True) + 1e-8
+        normals = avg_n / avg_norm
+        
+        return normals
+    
+    def compute_uncertainty_from_points(self, normals, points_3d):
+        """
+        从3D点云和法线计算不确定性图（忠于论文公式(7)）
+        
+        论文公式: U_p = 1 / |Ω| ∑_{pk ∈ Ω} || N_p^b · (P_pk - P_p) ||_2
+        其中||scalar||_2 等价于 |scalar|（距离的绝对值）。
+        |Ω|=8。
+        
+        Args:
+            normals: [B, 3, H, W] 已计算的法线（来自forward_from_points）
+            points_3d: [B, 4, H*W] 3D点云（齐次坐标）
+            
+        Returns:
+            uncertainty: [B, 1, H, W] 不确定性图
+        """
+        B = points_3d.shape[0]
+        H, W = self.height, self.width
+        
+        # 提取XYZ并reshape为[B, 3, H, W]
+        xyz = points_3d[:, :3].view(B, 3, H, W)
+        
+        # 复用邻域提取（与forward_from_points一致）
+        pad_xyz = F.pad(xyz, (1, 1, 1, 1), mode='replicate')
+        offsets = [(dy, dx) for dy in [-1, 0, 1] for dx in [-1, 0, 1] if not (dy == 0 and dx == 0)]
+        neigh_list = []
+        for dy, dx in offsets:
+            neigh = pad_xyz[:, :, 1 + dy : 1 + dy + H, 1 + dx : 1 + dx + W]
+            neigh_list.append(neigh)
+        neigh = torch.stack(neigh_list, dim=4)  # [B, 3, H, W, 8]
+        
+        # 计算向量：[B, 3, H, W, 8]
+        vec_k = neigh - xyz.unsqueeze(4)
+        
+        # 计算点积：[B, H, W, 8]
+        dots = torch.sum(normals.unsqueeze(4) * vec_k, dim=1)
+        
+        # 绝对值（距离）：[B, H, W, 8]
+        abs_dots = torch.abs(dots)
+        
+        # 平均过8个邻域：[B, H, W, 1]
+        uncertainty = abs_dots.mean(dim=3, keepdim=True)
+        
+        # 转置为[B, 1, H, W]
+        return uncertainty.permute(0, 3, 1, 2)
+    
+    def compute_normal_map(self, depth, K):
+        """
+        计算法线贴图，适用于可视化（与用户代码一致）
+        
+        Args:
+            depth: [B, 1, H, W] 深度图
+            K: [B, 4, 4] 相机内参
+            
+        Returns:
+            normal_map: [B, 3, H, W] 法线贴图（范围[0,1]）
+        """
+        normals = self.forward_from_depth(depth, K)
+        # 将法线从[-1,1]映射到[0,1]用于可视化
+        normal_map = (normals + 1.0) * 0.5
+        return torch.clamp(normal_map, 0.0, 1.0)

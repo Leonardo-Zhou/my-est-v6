@@ -130,6 +130,10 @@ class Options:
         self.parser.add_argument("--v1_multiscale",
                                 help="if set, uses monodepth v1 multiscale",
                                 action="store_true")
+        self.parser.add_argument("--description",
+                                type=str,
+                                help="description of the experiment",
+                                default="")
 
         self.dpt()
         self.decompose()

@@ -30,41 +30,42 @@ def load_models(model_path="./logs_v1/ht_dcmnet/models/weights_29", device=torch
 	
 	# 初始化网络
 	models = {}
-	
-
-	models["encoder"] = networks.H_Transformer(
-		window_size=4,           # 小窗口适合高分辨率，减少内存消耗
-			embed_dim=64,# 较小的嵌入维度，平衡性能和效率
-		depths=(2, 2, 18, 2),    # 经典配置：浅层-深层-最深-深层
-		num_heads=(4, 8, 16, 32) # 头数量随特征维度增加而增加
-	)
-	norm_cfg = dict(type='BN', requires_grad=False)
-	models["depth"] = networks.DCMNet(
-		in_channels=[64, 128, 256, 512],  # 编码器各阶段输出通道数
-		in_index=[0, 1, 2, 3],# 选择所有阶段特征
-		pool_scales=(1, 2, 3, 6),         # 多尺度池化：1x1, 2x2, 3x3, 6x6
-		channels=128,         # 中间特征通道数
-		dropout_ratio=0.1,    # 10% dropout正则化
-		num_classes=1,          # 深度估计：单通道输出
-		norm_cfg=norm_cfg,      # BatchNorm配置：使用BN，需要计算梯度
-		align_corners=False     # 上采样不强制对齐角点
-	)
-
+	model = networks.DepthSepQKV(resize_shape=(opt.height, opt.width), pretrained_path=opt.da_sep_qkv_folder)
+	models["depth"] = model
 	
 	# Pose编码器
 	models["pose_encoder"] = networks.ResnetEncoder(18, False, num_input_images=2)
 	
 	# Pose解码器
-	models["pose_decoder"] = networks.PoseDecoder(models["pose_encoder"].num_ch_enc, 
+	models["pose"] = networks.PoseDecoder(models["pose_encoder"].num_ch_enc, 
 													num_input_features=1, 
 													num_frames_to_predict_for=2)
 	
+	models["reflection"] = networks.MaskedSpatioTemporalReflectionModule(
+		num_heads=opt.heads, 
+		embed_dim=opt.embed_dim,
+		depth=12,
+		T=len(opt.frame_ids),
+		img_shape=(opt.height, opt.width),
+		drop_rate=opt.drop_rate,
+		attn_drop_rate=opt.attn_drop_rate,
+		drop_path_rate=opt.drop_path_rate,
+		patch_size=16,
+		qkv_bias=opt.qkv_bias)
+
+	models["decompose_encoder"] = networks.ResnetEncoder(
+		opt.num_layers, opt.weights_init == "pretrained")
+	
+	models["decompose"] = networks.DecomposeDecoder(
+		models["decompose_encoder"].num_ch_enc, opt.scales)
 	# 加载权重
 	model_weights = {
-		"encoder": "encoder.pth",
 		"depth": "depth.pth", 
 		"pose_encoder": "pose_encoder.pth",
-		"pose_decoder": "pose.pth"
+		"pose": "pose.pth",
+		"reflection": "reflection.pth",
+		"decompose_encoder": "decompose_encoder.pth",
+		"decompose": "decompose.pth",
 	}
 	
 	missing_weights = []

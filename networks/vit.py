@@ -459,3 +459,164 @@ class SpatioTemporalDeformableReflectionModule(nn.Module):
         self.features = features    
         suppress = F.relu(suppress)
         return suppress
+
+
+class MaskedSpatioTemporalReflectionModule(nn.Module):
+    def __init__(self, 
+                in_channels=3, 
+                embed_dim=256, 
+                num_heads=4, 
+                depth=12, 
+                mlp_ratio=4., 
+                qkv_bias=False, 
+                qk_scale=None, 
+                drop_rate=0., 
+                attn_drop_rate=0., 
+                drop_path_rate=0.1, 
+                patch_size=8, 
+                img_shape=(256, 320),
+                T=5,
+                attention_type='divided_space_time',
+                norm_layer=nn.LayerNorm,
+                feature_norm=True):
+        super().__init__()
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.attention_type = attention_type
+        # self.patch_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.patch_embed = PatchEmbed(img_size=img_shape, patch_size=patch_size, in_chans=in_channels, embed_dim=embed_dim)
+        self.mask_patch_embed = PatchEmbed(img_size=img_shape, patch_size=patch_size, in_chans=1, embed_dim=1)
+        num_patches = self.patch_embed.num_patches
+        # Positional embeddings from TimeSformer
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))  # +1 for cls
+        trunc_normal_(self.pos_embed, std=.02)
+        trunc_normal_(self.cls_token, std=.02)
+        self.apply(self._init_weights)
+        self.pos_drop = nn.Dropout(p=drop_rate)
+        self.sigmoid = nn.Sigmoid()
+        
+        # Time embeddings
+        self.time_embed = nn.Parameter(torch.zeros(1, T, embed_dim))
+        self.time_drop = nn.Dropout(p=drop_rate)
+        
+        # Attention blocks with divided_space_time
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        self.blocks = nn.ModuleList([
+            MaskedBlock(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, attention_type='divided_space_time')
+            for i in range(depth)])
+        ## initialization of temporal attention weights
+        if self.attention_type == 'divided_space_time':
+            i = 0
+            for m in self.blocks.modules():
+                m_str = str(m)
+                if 'Block' in m_str:
+                    if i > 0:
+                      nn.init.constant_(m.temporal_fc.weight, 0)
+                      nn.init.constant_(m.temporal_fc.bias, 0)
+                    i += 1
+        
+        self.norm = norm_layer(embed_dim)
+        
+        # Output projection to restore original channels
+        self.proj_out = nn.ConvTranspose2d(embed_dim, in_channels, kernel_size=patch_size, stride=patch_size)
+
+        self.intermediate_layer_idx = [2, 5, 8, 11]
+        self.sup_head = SupressedHead(
+            encoder_embed_dim=embed_dim,
+            decoder_embed_dim=embed_dim * 8,
+            decoder_depth=8,
+            decoder_num_heads=8,
+            img_shape=img_shape,
+            T = T,
+            patch_size=patch_size
+        )
+        self.feature_norm = feature_norm
+        self.temporal_attention_maps = []
+        self.temporal_attn_hooks = []
+        self.mask_embed = None
+        self._register_temporal_hooks()
+        self.features = None
+
+        self.sup_factors = []
+
+    def _register_temporal_hooks(self):
+        # 只注册一次
+        if len(self.temporal_attn_hooks) > 0:
+            return
+
+        self.temporal_attention_maps.clear()
+
+        def hook_fn(module, input, output):
+            if hasattr(module, 'attn') and module.attn is not None:
+                # 用clone() 复制，保持梯度流
+                self.temporal_attention_maps.append(module.attn.clone())
+
+        for blk in self.blocks:
+            if hasattr(blk, 'temporal_attn'):
+                hook = blk.temporal_attn.register_forward_hook(hook_fn)
+                self.temporal_attn_hooks.append(hook)
+
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.1)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def forward(self, A_seq, M_seq):
+        # 每个forward只清空maps
+        self.temporal_attention_maps.clear()
+        self.sup_factors.clear()
+
+        B, T, C, H, W = A_seq.shape
+        patched_M, _, _ = self.mask_patch_embed(M_seq)
+        patched_M = patched_M.squeeze(-1)
+        x, Hp, Wp = self.patch_embed(A_seq)
+        cls_tokens = torch.zeros(B*T, 1, self.embed_dim, device=x.device)
+        x = torch.cat((cls_tokens, x), dim=1)  
+        
+        if x.size(1) != self.pos_embed.size(1):
+            pos_embed = F.interpolate(self.pos_embed.transpose(1,2).unsqueeze(0), size=(1, x.size(1)), mode='bilinear').squeeze(0).transpose(1,2)
+        else:
+            pos_embed = self.pos_embed
+        x = x + pos_embed.expand(B*T, -1, -1)
+        x = self.pos_drop(x)
+        
+        cls_tokens = x[:B, 0, :].unsqueeze(1)
+        x = x[:,1:]
+        x = rearrange(x, '(b t) n m -> (b n) t m',b=B,t=T)
+        if T != self.time_embed.size(1):
+            time_embed = self.time_embed.transpose(1, 2)
+            new_time_embed = F.interpolate(time_embed, size=(T), mode='nearest')
+            new_time_embed = new_time_embed.transpose(1, 2)
+            x = x + new_time_embed
+        else:
+            x = x + self.time_embed
+        x = self.time_drop(x)
+        x = rearrange(x, '(b n) t m -> b (n t) m',b=B,t=T)
+        patched_M = rearrange(patched_M, '(b t) n  -> (b n) t',b=B,t=T)
+        self.mask_embed = patched_M
+        x = torch.cat((cls_tokens, x), dim=1)
+        features = []
+        for i, blk in enumerate(self.blocks):
+            x = blk(x, B, T, Wp, patched_M)
+            self.sup_factors.append(blk.temporal_attn.suppress_factor.detach().item())
+            if i in self.intermediate_layer_idx:
+                features.append(x)
+        
+        x = self.norm(x)
+        if self.feature_norm:
+            features = [self.norm(f) for f in features]
+            class_tokens = [f[:,0] for f in features]
+            features = [rearrange(f[:,1:], 'b (h w t) m -> (b t) (h w) m',b=B,t=T,h=Hp, w=Wp) for f in features]
+            features = tuple(zip(features, class_tokens))
+        suppress = self.sup_head(features)
+        self.features = features    
+        suppress = F.relu(suppress)
+        return suppress
